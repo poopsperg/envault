@@ -10,6 +10,7 @@ SALT_SIZE = 16
 NONCE_SIZE = 12
 KEY_SIZE = 32
 ITERATIONS = 390000
+MIN_PAYLOAD_SIZE = SALT_SIZE + NONCE_SIZE + 16  # 16 bytes = AES-GCM auth tag
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -46,8 +47,11 @@ def decrypt(encoded_payload: str, passphrase: str) -> str:
     except Exception as exc:
         raise ValueError("Invalid encrypted payload: bad base64 encoding.") from exc
 
-    if len(payload) < SALT_SIZE + NONCE_SIZE + 16:
-        raise ValueError("Invalid encrypted payload: too short.")
+    if len(payload) < MIN_PAYLOAD_SIZE:
+        raise ValueError(
+            f"Invalid encrypted payload: too short "
+            f"(got {len(payload)} bytes, need at least {MIN_PAYLOAD_SIZE})."
+        )
 
     salt = payload[:SALT_SIZE]
     nonce = payload[SALT_SIZE:SALT_SIZE + NONCE_SIZE]
