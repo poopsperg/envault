@@ -1,90 +1,121 @@
 """CLI entry-point for envault."""
 
 import argparse
-import getpass
 import sys
+from pathlib import Path
 
-from envault import vault, audit
+from envault.vault import lock, unlock, is_locked
+from envault.audit import get_events
+from envault.rotate import rotate, RotationError
 
 DEFAULT_ENV = ".env"
 DEFAULT_VAULT = ".env.vault"
 
 
-def cmd_lock(args) -> int:
-    passphrase = getpass.getpass("Master passphrase: ")
-    try:
-        out = vault.lock(args.file, passphrase, log_path=args.audit_log)
-        print(f"Locked → {out}")
-        return 0
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+def cmd_lock(args: argparse.Namespace) -> int:
+    env = Path(args.env)
+    vault = Path(args.vault)
+    if not env.exists():
+        print(f"error: env file not found: {env}", file=sys.stderr)
         return 1
-
-
-def cmd_unlock(args) -> int:
-    passphrase = getpass.getpass("Master passphrase: ")
-    try:
-        out = vault.unlock(args.file, passphrase, log_path=args.audit_log)
-        print(f"Unlocked → {out}")
-        return 0
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    except Exception:
-        print("Error: decryption failed — wrong passphrase or corrupt vault.", file=sys.stderr)
-        return 1
-
-
-def cmd_status(args) -> int:
-    locked = vault.is_locked(args.file)
-    state = "locked" if locked else "unlocked"
-    print(f"{args.file}: {state}")
+    lock(env, vault, args.passphrase)
+    print(f"Locked {env} -> {vault}")
     return 0
 
 
-def cmd_audit(args) -> int:
-    events = audit.get_events(log_path=args.audit_log)
+def cmd_unlock(args: argparse.Namespace) -> int:
+    vault = Path(args.vault)
+    env = Path(args.env)
+    if not vault.exists():
+        print(f"error: vault file not found: {vault}", file=sys.stderr)
+        return 1
+    unlock(vault, env, args.passphrase)
+    print(f"Unlocked {vault} -> {env}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    vault = Path(args.vault)
+    env = Path(args.env)
+    locked = is_locked(vault, env)
+    print("locked" if locked else "unlocked")
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    events = get_events()
     if not events:
         print("No audit events recorded.")
         return 0
-    for e in events[-args.tail:]:
-        status = "OK" if e["success"] else "FAIL"
-        print(f"[{e['timestamp']}] {e['action'].upper():6s} {status}  {e['vault_file']}")
+    for ev in events[-args.tail:]:
+        print(f"[{ev['timestamp']}] {ev['action']} {ev.get('details', '')}")
     return 0
 
 
+def cmd_rotate(args: argparse.Namespace) -> int:
+    vault = Path(args.vault)
+    env = Path(args.env)
+    try:
+        rotate(vault, env, args.old_passphrase, args.new_passphrase)
+        print(f"Passphrase rotated for {vault}")
+        return 0
+    except RotationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="envault", description="Lightweight local secrets manager")
-    parser.add_argument("--audit-log", default=audit.DEFAULT_AUDIT_LOG, metavar="FILE",
-                        help="path to audit log (default: %(default)s)")
+    parser = argparse.ArgumentParser(prog="envault", description="Local secrets manager")
+    sub = parser.add_subparsers(dest="command")
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    def _add_paths(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--env", default=DEFAULT_ENV)
+        p.add_argument("--vault", default=DEFAULT_VAULT)
 
-    p_lock = sub.add_parser("lock", help="encrypt .env → .env.vault")
-    p_lock.add_argument("file", nargs="?", default=DEFAULT_ENV)
+    # lock
+    p_lock = sub.add_parser("lock")
+    _add_paths(p_lock)
+    p_lock.add_argument("passphrase")
     p_lock.set_defaults(func=cmd_lock)
 
-    p_unlock = sub.add_parser("unlock", help="decrypt .env.vault → .env")
-    p_unlock.add_argument("file", nargs="?", default=DEFAULT_VAULT)
+    # unlock
+    p_unlock = sub.add_parser("unlock")
+    _add_paths(p_unlock)
+    p_unlock.add_argument("passphrase")
     p_unlock.set_defaults(func=cmd_unlock)
 
-    p_status = sub.add_parser("status", help="show lock state")
-    p_status.add_argument("file", nargs="?", default=DEFAULT_ENV)
+    # status
+    p_status = sub.add_parser("status")
+    _add_paths(p_status)
     p_status.set_defaults(func=cmd_status)
 
-    p_audit = sub.add_parser("audit", help="show recent audit events")
-    p_audit.add_argument("--tail", type=int, default=20, metavar="N",
-                         help="show last N events (default: %(default)s)")
+    # audit
+    p_audit = sub.add_parser("audit")
+    p_audit.add_argument("--tail", type=int, default=20)
     p_audit.set_defaults(func=cmd_audit)
+
+    # rotate
+    p_rotate = sub.add_parser("rotate")
+    _add_paths(p_rotate)
+    p_rotate.add_argument("old_passphrase")
+    p_rotate.add_argument("new_passphrase")
+    p_rotate.set_defaults(func=cmd_rotate)
 
     return parser
 
 
-def main(argv=None) -> int:
+def main() -> None:  # pragma: no cover
     parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    args = parser.parse_args()
+    if not hasattr(args, "func"):
+        parser.print_help()
+        sys.exit(0)
+    sys.exit(args.func(args))
